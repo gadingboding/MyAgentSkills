@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
+import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+import yaml
 
 
 HEADERS = {
@@ -30,17 +33,39 @@ MIXIN_KEY_ENC_TAB = [
 ]
 
 
+def str_presenter(dumper, data):
+    if "\n" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+
+yaml.add_representer(str, str_presenter, Dumper=yaml.SafeDumper)
+
+
 def get_json(url):
     req = Request(url, headers=HEADERS)
     with urlopen(req, timeout=15) as resp:
         return json.load(resp)
 
 
-def extract_bvid(value):
-    match = re.search(r"BV[0-9A-Za-z]+", value)
-    if not match:
-        raise ValueError("没有找到 BV 号")
-    return match.group(0)
+def extract_bvid(target):
+    target = target.strip()
+
+    # Only standard BV ID supported
+    if re.match(r"^BV[0-9A-Za-z]{10}$", target):
+        return target
+
+    # Or URLs like https://www.bilibili.com/video/BV1FmqGB8Ef9/
+    match = re.match(
+        r"^https?://(?:www\.)?bilibili\.com/video/(BV[0-9A-Za-z]{10})/?(?:\?.*)?$",
+        target,
+    )
+    if match:
+        return match.group(1)
+
+    raise ValueError(
+        "Invalid video target: only BV ID or URLs like https://www.bilibili.com/video/BV.../ are supported."
+    )
 
 
 def get_video_info(bvid):
@@ -49,8 +74,10 @@ def get_video_info(bvid):
         f"?bvid={quote(bvid)}"
     )
 
-    if data["code"] != 0:
-        raise RuntimeError(data["message"])
+    if data.get("code") != 0:
+        raise RuntimeError(
+            f"Failed to get video info: {data.get('code')} {data.get('message')}"
+        )
 
     return data["data"]
 
@@ -77,14 +104,12 @@ def sign_wbi(params, img_key, sub_key):
     params = dict(params)
     params["wts"] = int(time.time())
 
-    # WBI 要求过滤这些字符
     for key in params:
         params[key] = "".join(
             c for c in str(params[key])
             if c not in "!'()*"
         )
 
-    # 按 key 排序，并按照 encodeURIComponent 的方式编码
     query = "&".join(
         f"{quote(str(k), safe='~-._')}="
         f"{quote(str(v), safe='~-._')}"
@@ -100,11 +125,11 @@ def sign_wbi(params, img_key, sub_key):
     return query + "&w_rid=" + w_rid
 
 
-def get_comments(aid, img_key, sub_key, pagination_str):
+def get_comments(aid, img_key, sub_key, mode, pagination_str):
     params = {
         "oid": aid,
         "type": 1,
-        "mode": 3,  # 热度排序；2 = 时间排序
+        "mode": mode,  # 3 = hot; 2 = latest
         "pagination_str": pagination_str,
         "plat": 1,
         "web_location": 1315875,
@@ -117,80 +142,249 @@ def get_comments(aid, img_key, sub_key, pagination_str):
         + query
     )
 
-    if data["code"] != 0:
+    if data.get("code") != 0:
         raise RuntimeError(
-            f"Bilibili API 错误: "
-            f"{data['code']} {data.get('message')}"
+            f"Bilibili API error: "
+            f"{data.get('code')} {data.get('message')}"
         )
 
     return data["data"]
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(
-            f"用法: {sys.argv[0]} <BV号或视频URL> [页数]",
-            file=sys.stderr,
+def is_emoji_char(ch):
+    code = ord(ch)
+    return (
+        0x1F300 <= code <= 0x1FAFF
+        or 0x1F600 <= code <= 0x1F64F
+        or 0x1F680 <= code <= 0x1F6FF
+        or 0x2600 <= code <= 0x27BF
+        or 0xFE00 <= code <= 0xFE0F
+        or 0x1F900 <= code <= 0x1F9FF
+    )
+
+
+def clean_comment_text(content_obj):
+    if not isinstance(content_obj, dict):
+        return ""
+
+    msg = content_obj.get("message", "")
+    if not msg:
+        return ""
+
+    emotes = content_obj.get("emote") or {}
+    for emote_text in emotes:
+        msg = msg.replace(emote_text, "")
+
+    msg = "".join(ch for ch in msg if not is_emoji_char(ch))
+    return msg.strip()
+
+
+def get_sub_comments(aid, root_rpid, preview_replies, rcount, sub_cache, sub_limit=10):
+    if rcount == 0 or sub_limit <= 0:
+        return []
+
+    if root_rpid in sub_cache:
+        return list(sub_cache[root_rpid][:sub_limit])
+
+    if rcount <= len(preview_replies) and len(preview_replies) <= sub_limit:
+        raw_list = preview_replies
+    else:
+        ps = min(sub_limit, 20)
+        url = (
+            f"https://api.bilibili.com/x/v2/reply/detail"
+            f"?oid={aid}&type=1&root={root_rpid}&ps={ps}&pn=1"
         )
-        sys.exit(1)
+        try:
+            data = get_json(url)
+            root_data = (data.get("data", {}) or {}).get("root", {}) or {}
+            raw_list = (
+                root_data.get("replies")
+                or (data.get("data", {}) or {}).get("replies")
+                or []
+            )
+        except Exception:
+            raw_list = preview_replies[:sub_limit]
+        time.sleep(0.05)
 
-    bvid = extract_bvid(sys.argv[1])
+    sub_comments = []
+    for sub in raw_list[:sub_limit]:
+        cleaned = clean_comment_text(sub.get("content", {}))
+        if cleaned:
+            sub_comments.append(cleaned)
 
-    # 默认抓一页；0 表示一直抓到最后
-    max_pages = int(sys.argv[2]) if len(sys.argv) >= 3 else 1
+    sub_cache[root_rpid] = list(sub_comments)
+    return list(sub_comments)
 
-    video = get_video_info(bvid)
 
-    print(f"标题: {video['title']}")
-    print(f"BV: {video['bvid']}")
-    print(f"AID: {video['aid']}")
-    print()
+def fetch_comments_by_mode(
+    aid,
+    img_key,
+    sub_key,
+    mode,
+    limit=50,
+    sub_cache=None,
+    exclude_rpids=None,
+    sub_limit=10,
+):
+    if sub_cache is None:
+        sub_cache = {}
 
-    img_key, sub_key = get_wbi_keys()
+    if limit <= 0:
+        return [], set()
 
-    pagination_str = '{"offset":""}'
-    page = 0
+    comments = []
+    rpids = set()
+    offset = ""
+    inspected = 0
 
-    while True:
-        page += 1
-
-        data = get_comments(
-            video["aid"],
-            img_key,
-            sub_key,
-            pagination_str,
-        )
+    while inspected < limit:
+        pagination_str = json.dumps({"offset": offset})
+        data = get_comments(aid, img_key, sub_key, mode, pagination_str)
 
         replies = data.get("replies") or []
+        if not replies:
+            break
 
         for reply in replies:
-            member = reply.get("member", {})
-            content = reply.get("content", {})
+            cleaned_msg = clean_comment_text(reply.get("content", {}))
+            if not cleaned_msg:
+                continue
 
-            print(
-                f"[{reply.get('like', 0)}赞] "
-                f"{member.get('uname', '')}: "
-                f"{content.get('message', '')}"
+            root_rpid = reply.get("rpid")
+            rpids.add(root_rpid)
+            inspected += 1
+
+            if exclude_rpids and root_rpid in exclude_rpids:
+                if inspected >= limit:
+                    break
+                continue
+
+            rcount = reply.get("rcount", 0)
+            preview_replies = reply.get("replies") or []
+
+            sub_comments = get_sub_comments(
+                aid,
+                root_rpid,
+                preview_replies,
+                rcount,
+                sub_cache,
+                sub_limit=sub_limit,
             )
 
-        cursor = data.get("cursor", {})
+            item = {"content": cleaned_msg}
+            if sub_comments:
+                item["sub_comments"] = sub_comments
 
+            comments.append(item)
+
+            if inspected >= limit:
+                break
+
+        cursor = data.get("cursor", {})
         if cursor.get("is_end"):
             break
 
         pagination = cursor.get("pagination_reply") or {}
-        next_offset = pagination.get("next_offset")
-
-        if not next_offset:
+        offset = pagination.get("next_offset")
+        if not offset:
             break
 
-        pagination_str = next_offset
+        time.sleep(0.2)
 
-        if max_pages != 0 and page >= max_pages:
-            break
+    return comments, rpids
 
-        # 不要连续高速请求
-        time.sleep(0.5)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Fetch Bilibili video comments (hot and latest) and export to a YAML file."
+    )
+    parser.add_argument(
+        "target",
+        help="Bilibili video BV ID or URL (e.g. BV1FmqGB8Ef9 or https://www.bilibili.com/video/BV1FmqGB8Ef9/)",
+    )
+    parser.add_argument(
+        "output",
+        help="Output YAML file path",
+    )
+    parser.add_argument(
+        "--hot",
+        type=int,
+        default=50,
+        help="Maximum number of hot comments to fetch (default: 50)",
+    )
+    parser.add_argument(
+        "--latest",
+        type=int,
+        default=50,
+        help="Maximum number of latest comments to fetch (default: 50)",
+    )
+    parser.add_argument(
+        "--sub",
+        type=int,
+        default=10,
+        help="Maximum number of sub-comments per comment to fetch (default: 10)",
+    )
+
+    args = parser.parse_args()
+
+    target = args.target
+    output_path = args.output
+
+    bvid = extract_bvid(target)
+    video = get_video_info(bvid)
+    aid = video["aid"]
+
+    img_key, sub_key = get_wbi_keys()
+    sub_cache = {}
+
+    hot_comments, hot_rpids = fetch_comments_by_mode(
+        aid,
+        img_key,
+        sub_key,
+        mode=3,
+        limit=args.hot,
+        sub_cache=sub_cache,
+        sub_limit=args.sub,
+    )
+    latest_comments, _ = fetch_comments_by_mode(
+        aid,
+        img_key,
+        sub_key,
+        mode=2,
+        limit=args.latest,
+        sub_cache=sub_cache,
+        exclude_rpids=hot_rpids,
+        sub_limit=args.sub,
+    )
+
+    output_data = {
+        "video": {
+            "title": video.get("title", ""),
+            "bvid": video.get("bvid", ""),
+            "url": f"https://www.bilibili.com/video/{video.get('bvid', '')}/",
+        },
+        "hot_comments": hot_comments,
+        "latest_comments": latest_comments,
+    }
+
+    abs_output_path = os.path.abspath(output_path)
+    output_dir = os.path.dirname(abs_output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    with open(abs_output_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(output_data, f, allow_unicode=True, sort_keys=False)
+
+    total_main = len(hot_comments) + len(latest_comments)
+    total_sub = sum(len(c.get("sub_comments", [])) for c in hot_comments) + sum(
+        len(c.get("sub_comments", [])) for c in latest_comments
+    )
+
+    print(
+        f"Success: fetched {total_main} main comments (hot: {len(hot_comments)}, latest: {len(latest_comments)}) "
+        f"and {total_sub} sub-comments.\n"
+        f"Output saved to: {abs_output_path}"
+    )
 
 
 if __name__ == "__main__":

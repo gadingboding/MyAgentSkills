@@ -1,0 +1,7 @@
+interface:
+  display_name: "bilibili-video-comment"
+  short_description: "抓取哔哩哔哩视频评论并保存为 YAML 文件"
+  default_prompt: "使用 $bilibili-video-comment 抓取指定哔哩哔哩视频的评论并导出为 YAML 文件。"
+
+policy:
+  allow_implicit_invocation: true
