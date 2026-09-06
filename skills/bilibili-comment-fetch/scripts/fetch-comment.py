@@ -48,23 +48,75 @@ def get_json(url):
         return json.load(resp)
 
 
-def extract_bvid(target):
+def get_html(url):
+    req = Request(url, headers=HEADERS)
+    with urlopen(req, timeout=15) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
+
+
+def resolve_short_link(url):
+    if "b23.tv" in url:
+        try:
+            req = Request(url, headers=HEADERS)
+            with urlopen(req, timeout=10) as resp:
+                return resp.geturl()
+        except Exception:
+            pass
+    return url
+
+
+def parse_target(target):
     target = target.strip()
+    target = resolve_short_link(target)
 
-    # Only standard BV ID supported
+    # 1. BV ID
     if re.match(r"^BV[0-9A-Za-z]{10}$", target):
-        return target
+        return {"kind": "video", "id": target}
 
-    # Or URLs like https://www.bilibili.com/video/BV1FmqGB8Ef9/
-    match = re.match(
-        r"^https?://(?:www\.)?bilibili\.com/video/(BV[0-9A-Za-z]{10})/?(?:\?.*)?$",
+    # 2. Video URL
+    m_vid = re.match(
+        r"^https?://(?:(?:www|m)\.)?bilibili\.com/video/(BV[0-9A-Za-z]{10})/?(?:\?.*)?$",
         target,
     )
-    if match:
-        return match.group(1)
+    if m_vid:
+        return {"kind": "video", "id": m_vid.group(1)}
+
+    # 3. Opus URL (e.g. https://www.bilibili.com/opus/1244951340878135321)
+    m_opus = re.match(
+        r"^https?://(?:(?:www|m)\.)?bilibili\.com/opus/([0-9]+)/?(?:\?.*)?$",
+        target,
+    )
+    if m_opus:
+        return {"kind": "opus", "id": m_opus.group(1)}
+
+    # 4. t.bilibili.com URL (e.g. https://t.bilibili.com/1244951340878135321)
+    m_t = re.match(
+        r"^https?://(?:(?:www|m)\.)?t\.bilibili\.com/([0-9]+)/?(?:\?.*)?$",
+        target,
+    )
+    if m_t:
+        return {"kind": "opus", "id": m_t.group(1)}
+
+    # 5. Mobile dynamic URL (e.g. https://m.bilibili.com/dynamic/1244951340878135321)
+    m_dyn = re.match(
+        r"^https?://(?:(?:www|m)\.)?bilibili\.com/dynamic/([0-9]+)/?(?:\?.*)?$",
+        target,
+    )
+    if m_dyn:
+        return {"kind": "opus", "id": m_dyn.group(1)}
+
+    # 6. Opus prefix (e.g. opus1244951340878135321 or opus/1244951340878135321)
+    m_opus_prefix = re.match(r"^opus/?([0-9]+)$", target, re.IGNORECASE)
+    if m_opus_prefix:
+        return {"kind": "opus", "id": m_opus_prefix.group(1)}
+
+    # 7. Pure numeric dynamic/opus ID (usually 12+ digits)
+    if re.match(r"^[0-9]{12,}$", target):
+        return {"kind": "opus", "id": target}
 
     raise ValueError(
-        "Invalid video target: only BV ID or URLs like https://www.bilibili.com/video/BV.../ are supported."
+        "Invalid target: only BV ID, video URL, or opus/dynamic URL/ID are supported.\n"
+        f"Received: {target}"
     )
 
 
@@ -79,7 +131,69 @@ def get_video_info(bvid):
             f"Failed to get video info: {data.get('code')} {data.get('message')}"
         )
 
-    return data["data"]
+    vdata = data["data"]
+    return {
+        "kind": "video",
+        "oid": vdata["aid"],
+        "comment_type": 1,
+        "title": vdata.get("title", ""),
+        "bvid": vdata.get("bvid", ""),
+        "url": f"https://www.bilibili.com/video/{vdata.get('bvid', '')}/",
+    }
+
+
+def get_opus_info(opus_id):
+    url = f"https://www.bilibili.com/opus/{opus_id}"
+    html = get_html(url)
+
+    idx = html.find("__INITIAL_STATE__")
+    if idx == -1:
+        raise RuntimeError(f"Failed to locate __INITIAL_STATE__ in {url}")
+
+    brace_idx = html.find("{", idx)
+    if brace_idx == -1:
+        raise RuntimeError(f"Failed to locate JSON start in {url}")
+
+    decoder = json.JSONDecoder()
+    state, _ = decoder.raw_decode(html, brace_idx)
+
+    detail = state.get("detail", {})
+    basic = detail.get("basic", {})
+    comment_type = basic.get("comment_type")
+    comment_id = basic.get("comment_id_str") or basic.get("rid_str")
+
+    if not comment_type or not comment_id:
+        raise RuntimeError(f"Failed to extract comment_type or comment_id from {url}")
+
+    title = ""
+    author = ""
+    for mod in detail.get("modules", []):
+        if not title and mod.get("module_title") and mod["module_title"].get("text"):
+            title = mod["module_title"]["text"].strip()
+        if not author and mod.get("module_author") and mod["module_author"].get("name"):
+            author = mod["module_author"]["name"].strip()
+
+    if not title:
+        title = basic.get("title", "")
+
+    return {
+        "kind": "opus",
+        "oid": str(comment_id),
+        "comment_type": int(comment_type),
+        "id": str(opus_id),
+        "title": title,
+        "author": author,
+        "url": url,
+    }
+
+
+def get_target_info(target_spec):
+    if target_spec["kind"] == "video":
+        return get_video_info(target_spec["id"])
+    elif target_spec["kind"] == "opus":
+        return get_opus_info(target_spec["id"])
+    else:
+        raise ValueError(f"Unknown target kind: {target_spec.get('kind')}")
 
 
 def get_wbi_keys():
@@ -125,10 +239,10 @@ def sign_wbi(params, img_key, sub_key):
     return query + "&w_rid=" + w_rid
 
 
-def get_comments(aid, img_key, sub_key, mode, pagination_str):
+def get_comments(oid, comment_type, img_key, sub_key, mode, pagination_str):
     params = {
-        "oid": aid,
-        "type": 1,
+        "oid": oid,
+        "type": comment_type,
         "mode": mode,  # 3 = hot; 2 = latest
         "pagination_str": pagination_str,
         "plat": 1,
@@ -179,7 +293,7 @@ def clean_comment_text(content_obj):
     return msg.strip()
 
 
-def get_sub_comments(aid, root_rpid, preview_replies, rcount, sub_cache, sub_limit=10):
+def get_sub_comments(oid, comment_type, root_rpid, preview_replies, rcount, sub_cache, sub_limit=10):
     if rcount == 0 or sub_limit <= 0:
         return []
 
@@ -192,7 +306,7 @@ def get_sub_comments(aid, root_rpid, preview_replies, rcount, sub_cache, sub_lim
         ps = min(sub_limit, 20)
         url = (
             f"https://api.bilibili.com/x/v2/reply/detail"
-            f"?oid={aid}&type=1&root={root_rpid}&ps={ps}&pn=1"
+            f"?oid={oid}&type={comment_type}&root={root_rpid}&ps={ps}&pn=1"
         )
         try:
             data = get_json(url)
@@ -217,7 +331,8 @@ def get_sub_comments(aid, root_rpid, preview_replies, rcount, sub_cache, sub_lim
 
 
 def fetch_comments_by_mode(
-    aid,
+    oid,
+    comment_type,
     img_key,
     sub_key,
     mode,
@@ -239,7 +354,7 @@ def fetch_comments_by_mode(
 
     while inspected < limit:
         pagination_str = json.dumps({"offset": offset})
-        data = get_comments(aid, img_key, sub_key, mode, pagination_str)
+        data = get_comments(oid, comment_type, img_key, sub_key, mode, pagination_str)
 
         replies = data.get("replies") or []
         if not replies:
@@ -263,7 +378,8 @@ def fetch_comments_by_mode(
             preview_replies = reply.get("replies") or []
 
             sub_comments = get_sub_comments(
-                aid,
+                oid,
+                comment_type,
                 root_rpid,
                 preview_replies,
                 rcount,
@@ -296,11 +412,11 @@ def fetch_comments_by_mode(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch Bilibili video comments (hot and latest) and export to a YAML file."
+        description="Fetch Bilibili video or dynamic/opus comments (hot and latest) and export to a YAML file."
     )
     parser.add_argument(
         "target",
-        help="Bilibili video BV ID or URL (e.g. BV1FmqGB8Ef9 or https://www.bilibili.com/video/BV1FmqGB8Ef9/)",
+        help="Bilibili video BV ID/URL or dynamic/opus URL/ID (e.g. BV1FmqGB8Ef9 or https://www.bilibili.com/opus/1244951340878135321)",
     )
     parser.add_argument(
         "output",
@@ -330,15 +446,18 @@ def main():
     target = args.target
     output_path = args.output
 
-    bvid = extract_bvid(target)
-    video = get_video_info(bvid)
-    aid = video["aid"]
+    target_spec = parse_target(target)
+    target_info = get_target_info(target_spec)
+
+    oid = target_info["oid"]
+    comment_type = target_info["comment_type"]
 
     img_key, sub_key = get_wbi_keys()
     sub_cache = {}
 
     hot_comments, hot_rpids = fetch_comments_by_mode(
-        aid,
+        oid,
+        comment_type,
         img_key,
         sub_key,
         mode=3,
@@ -347,7 +466,8 @@ def main():
         sub_limit=args.sub,
     )
     latest_comments, _ = fetch_comments_by_mode(
-        aid,
+        oid,
+        comment_type,
         img_key,
         sub_key,
         mode=2,
@@ -357,15 +477,29 @@ def main():
         sub_limit=args.sub,
     )
 
-    output_data = {
-        "video": {
-            "title": video.get("title", ""),
-            "bvid": video.get("bvid", ""),
-            "url": f"https://www.bilibili.com/video/{video.get('bvid', '')}/",
-        },
-        "hot_comments": hot_comments,
-        "latest_comments": latest_comments,
-    }
+    if target_info["kind"] == "video":
+        target_meta = {
+            "title": target_info.get("title", ""),
+            "bvid": target_info.get("bvid", ""),
+            "url": target_info.get("url", ""),
+        }
+        output_data = {
+            "video": target_meta,
+            "hot_comments": hot_comments,
+            "latest_comments": latest_comments,
+        }
+    else:
+        opus_meta = {
+            "title": target_info.get("title", ""),
+            "id": target_info.get("id", ""),
+            "author": target_info.get("author", ""),
+            "url": target_info.get("url", ""),
+        }
+        output_data = {
+            "opus": opus_meta,
+            "hot_comments": hot_comments,
+            "latest_comments": latest_comments,
+        }
 
     abs_output_path = os.path.abspath(output_path)
     output_dir = os.path.dirname(abs_output_path)
@@ -380,8 +514,10 @@ def main():
         len(c.get("sub_comments", [])) for c in latest_comments
     )
 
+    kind_desc = "video" if target_info["kind"] == "video" else "dynamic/opus"
     print(
-        f"Success: fetched {total_main} main comments (hot: {len(hot_comments)}, latest: {len(latest_comments)}) "
+        f"Success: fetched {total_main} main comments for {kind_desc} "
+        f"(hot: {len(hot_comments)}, latest: {len(latest_comments)}) "
         f"and {total_sub} sub-comments.\n"
         f"Output saved to: {abs_output_path}"
     )

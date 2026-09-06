@@ -1,0 +1,7 @@
+interface:
+  display_name: "bilibili-content-download"
+  short_description: "下载哔哩哔哩视频，或将动态/专栏内容导出为 PDF"
+  default_prompt: "使用 $bilibili-content-download 下载哔哩哔哩视频，或抓取动态/专栏内容并导出为 PDF。"
+
+policy:
+  allow_implicit_invocation: true
