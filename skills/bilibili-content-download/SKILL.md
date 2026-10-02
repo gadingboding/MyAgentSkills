@@ -37,7 +37,7 @@ python3 skills/bilibili-content-download/scripts/fetch-opus-pdf.py "<动态或�
 ### 下载流程
 
 1. 从当前任务上下文、已有页面、消息或上一步结果中确定哔哩哔哩视频链接。若没有直接链接，但目标视频可被唯一识别，则先通过可用的检索或浏览能力定位其链接；只有无法确定具体视频时才向用户询问。
-2. 根据当前任务选择便于后续步骤使用的输出目录。任务未指定且没有更合适的工作目录时，保存到当前工作目录；不要覆盖已有文件。
+2. 用户未指定输出目录时，优先将视频保存到当前agent会话的临时目录中。执行下载前确保目录存在，不要覆盖已有文件。
 3. 直接执行下载命令，不要预先检查用户是否安装了 `ffmpeg`：
 
 ```bash
@@ -47,7 +47,7 @@ uvx --from yt-dlp yt-dlp \
   --merge-output-format mp4 \
   --remux-video mp4 \
   --no-overwrites \
-  --output "%(title).200B [%(id)s].%(ext)s" \
+  --output "<会话临时目录>/%(title).200B [%(id)s].%(ext)s" \
   "<哔哩哔哩视频链接>"
 ```
 
