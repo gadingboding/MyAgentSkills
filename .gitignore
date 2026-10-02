@@ -1,5 +1,6 @@
 .codex
 .agents
 skills-lock.json
+skills-pack
 __pycache__/
 *.pyc
