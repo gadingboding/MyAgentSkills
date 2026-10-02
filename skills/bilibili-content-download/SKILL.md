@@ -32,6 +32,8 @@ python3 skills/bilibili-content-download/scripts/fetch-opus-pdf.py "<动态或�
 
 使用 `uvx` 临时运行 `yt-dlp`，无需预先安装 `yt-dlp`。默认下载不高于 480P 的最佳视频流和最佳音频流，并将两者合并为 MP4 文件。
 
+下载哔哩哔哩视频时，不使用任何代理。
+
 ### 下载流程
 
 1. 从当前任务上下文、已有页面、消息或上一步结果中确定哔哩哔哩视频链接。若没有直接链接，但目标视频可被唯一识别，则先通过可用的检索或浏览能力定位其链接；只有无法确定具体视频时才向用户询问。
@@ -40,6 +42,7 @@ python3 skills/bilibili-content-download/scripts/fetch-opus-pdf.py "<动态或�
 
 ```bash
 uvx --from yt-dlp yt-dlp \
+  --proxy "" \
   --format "bestvideo[height<=480]+bestaudio/best[height<=480]" \
   --merge-output-format mp4 \
   --remux-video mp4 \
