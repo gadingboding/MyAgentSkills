@@ -31,7 +31,7 @@ python3 scripts/fetch-comment.py "<目标标识或链接>" "<输出YAML路径>" 
      - **视频**：标准 BV 号（例如 `BV1FmqGB8Ef9`）或视频链接（例如 `https://www.bilibili.com/video/BV1FmqGB8Ef9/`）。
      - **动态/Opus**：Opus 链接（例如 `https://www.bilibili.com/opus/1244951340878135321`）、动态链接（例如 `https://t.bilibili.com/1244951340878135321`）、纯数字动态 ID（例如 `1244951340878135321`）或前缀格式（如 `opus1244951340878135321`）。
      - 支持 `b23.tv` 短链接（自动跟随重定向）。
-   - `output`：输出的 YAML 文件路径（若父目录不存在会自动创建）。
+   - `output`：输出的 YAML 文件路径（若父目录不存在会自动创建）。用户未指定路径时，优先保存到当前 agent 会话的临时目录。
 
 2. 可选参数：
    - `--hot <数量>`：抓取最热评论的数量上限，默认值为 50。若设为 0 则不抓取最热评论。
