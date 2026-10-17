@@ -1,0 +1,34 @@
+{
+  "skills": [
+    {
+      "source": "detect-user-intent.md",
+      "name": "detect-user-intent",
+      "description": "判断用户当前是想获取信息还是希望 agent 实际动手做事。无条件启用——只要启用本 skill 就始终生效，不必等用户说出「做」「改」「帮我」之类的动词。"
+    },
+    {
+      "source": "english-language-coach.md",
+      "name": "english-language-coach",
+      "description": "回复用户时附带英文语言指导，并用 `++++++++++++++++++++` 与正文分隔。仅在对话模式下生效；处于 agent/work 模式执行具体任务时不适用。启用后只要处于对话回复场景即自动生效。"
+    },
+    {
+      "source": "keep-user-in-the-loop.md",
+      "name": "keep-user-in-the-loop",
+      "description": "执行任务时持续同步状态、计划与困难，遇到高风险或方向不明时先向用户求助。无条件启用——只要启用本 skill 就始终生效，适用于所有多步骤任务。"
+    },
+    {
+      "source": "readable-output.md",
+      "name": "readable-output",
+      "description": "输出用户可读内容时保证语法正确、用词地道、逻辑连贯，不出现英文直译和过度跳跃的表述。无条件启用——只要启用本 skill 就始终生效，适用于所有面向用户的文字输出。"
+    },
+    {
+      "source": "search-before-answer.md",
+      "name": "search-before-answer",
+      "description": "回答涉及时效性或具体性事实前先判断预训练知识是否可靠，不可靠就查询，包括网络搜索和本地环境查询。无条件启用——启用后每次作答前都先做一次「是否需要查」的判断，但稳定、通用的常识不必查。"
+    },
+    {
+      "source": "simplest-solution-first.md",
+      "name": "simplest-solution-first",
+      "description": "优先选用最简单的可行方案，先确认是否已有现成工具可用，不过度设计、不做无谓测试，同时不做矫枉过正。无条件启用——只要启用本 skill 就始终生效。"
+    }
+  ]
+}
